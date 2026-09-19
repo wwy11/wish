@@ -51,9 +51,11 @@ const GEAR =
 let items = [];
 let pulsesByItem = Object.create(null);
 let tab = 'wish';
-/* 自己管的导航栈：每次进入页面 push，回退 pop。
-   浏览器历史深度恒为 1（全部用 location.replace），系统右滑从此无内容可滑 */
-let appStack = [];
+/* 应用内跳转栈：go() 压入出发页，back()/finishTo() 消费。
+   只在应用内跳转时有值——刷新后/直接打开深链时它是空的，
+   此时退无可退，就用 location.replace 原地换页，不会退出 app。
+   （从 coffee 抄的同一思路） */
+let navStack = [];
 
 /* ============ 工具 ============ */
 const $ = (sel, root) => (root || document).querySelector(sel);
@@ -262,6 +264,8 @@ function renderHome() {
 
     <div class="list">${list.length ? list.map(cardHtml).join('') : `<div class="empty">${esc(emptyText)}</div>`}</div>
   `;
+
+  ensureHomeGuard();
 }
 
 /* ============ 页面：批量复评 ============ */
@@ -973,37 +977,72 @@ async function removeItem(id) {
 
 /* ============ 路由 ============ */
 /**
- * 导航不用浏览器历史——所有跳转走 location.replace，浏览器历史深度恒为 1。
- * 这么干是为了彻底甩掉 iOS 系统右滑=history.back 这个不可控的坑：
- *   - 没有「首页底下压着详情页」这种历史脏条目，守卫/黑洞都不需要了；
- *   - 系统右滑在任何页面都是退出 app（standalone 体感反而对：像原生 app）；
- *   - 老版本（v1/v2/v3）攒在浏览器栈里的脏条目也自动失效——栈深度永远是 1。
- * 我们自己维护 appStack 用来实现 in-app 返回按钮。
+ * 导航用浏览器原生历史（push），不是虚拟栈。原因：
+ *   - 子页面系统右滑必须能回首页——v5 那种全程 replace 会把这条堵死；
+ *   - 咖啡（饮记）就是这套：go() push、goBack() 走 history.back()，
+ *     子页面右滑天然可用、首页在栈底天然没东西可滑。
+ * 我们自己维护 navStack 来判断「有没有上一页」：刷新/深链打开时它是空的，
+ * 退无可退就 location.replace 原地换页，不会触发系统「退出 app」。
+ *
+ * 首页守卫（ensureHomeGuard）只解决一件事：跨 session 累积在浏览器栈里的
+ * 脏历史（比如旧版本/其他 tab 留下的「首页底下压着详情」）会被系统右滑踩到。
+ * 子页面之间干净——go() 总是从当前页 push，back() 走原生历史，不会制造脏条目。
  */
 function go(hash) {
-  const h = hash[0] === '#' ? hash : '#/' + hash;
-  appStack.push(h);
-  location.replace(h);
+  // 标记自己刚改的 hash：Chrome 在 location.hash 变化时也会触发 popstate（不符合规范），
+  // 没有这个标记 popstate 监听器会把刚 push 进 navStack 的项又 pop 掉。
+  // 真正是「回退」（系统右滑 / 我们的 history.back）时 location.hash 必然不等于这个标记。
+  _lastGoHash = '#/' + hash;
+  const cur = (location.hash || '#/home').replace(/^#\/?/, '') || 'home';
+  if (cur === 'home') {
+    /* 从首页出发 → replace：保证 history.back() 自然回到首页。
+       这样「首页→detail→回→首页→detail(另一条)→回」也不会在栈里堆 detail 副本 */
+    navStack.push('home');
+    location.replace('#/' + hash);
+  } else {
+    /* 从子页面出发 → push：让 history.back() 回到上一层子页面（编辑→详情、详情→冷却等） */
+    navStack.push(cur);
+    location.hash = '#/' + hash;
+  }
 }
 
+let _lastGoHash = '';
+
 function back() {
-  if (appStack.length <= 1) return; // 已在首页，in-app 返回无动作
-  appStack.pop();
-  location.replace(appStack[appStack.length - 1]);
+  // 不需要手动 pop navStack：popstate 监听会自动同步
+  if (navStack.length > 0) {
+    history.back();
+  } else {
+    location.replace('#/home');
+  }
 }
 
 /**
- * 表单保存、删除这类「完事回上一页」专用：栈够长就 pop 一层回到父页面，
- * 否则（极少见，比如冷加载到深链页面后立刻保存）落到 fallback。
- * 不要再用 go()——go 会 push 一条新历史，编辑/删除后就留在原地不会回去。
+ * 保存、删除这类「完事回上一页」专用：能回到上一页就用上一页，否则落到 fallback。
+ * 关键：保存后不能 go()——go 会把父页面再压一层，下次返回就回到那个父页面而不是孙页面。
  */
 function finishTo(fallback) {
-  if (appStack.length >= 2) {
-    appStack.pop();
-    location.replace(appStack[appStack.length - 1]);
+  if (navStack.length > 0) {
+    history.back(); // popstate 会同步 pop navStack
   } else {
     location.replace('#/' + fallback);
   }
+}
+
+/** 首页守卫：进首页时如果当前条目不是守卫，就垫一层 pushState。
+    垫一次挡一次右滑；同一会话内重复进首页不会重复垫（有标记就跳过）。 */
+const onHomeHash = () => {
+  const h = location.hash.replace(/^#\/?/, '');
+  return !h || h === 'home';
+};
+
+function ensureHomeGuard() {
+  if (!onHomeHash()) return;
+  try {
+    const st = history.state;
+    if (st && st.wishGuard) return;
+    history.pushState({ wishGuard: true }, '', location.href);
+  } catch (e) {} // 极端环境 pushState 可能抛错，不能因此挡住首页渲染
 }
 
 function render() {
@@ -1063,11 +1102,8 @@ function bindEvents() {
 async function boot() {
   loadSettings();
   applyTheme(); // 首帧脚本已经定过一次，这里再同步一遍（顺带处理设置页改完主题的情况）
-  // 用当前 hash 还原 appStack：冷加载到首页就是 ['#/home']，深链就带上 ['#/home', '#/...']
-  // ——这样不管从哪里进来，in-app 返回按钮的「父页面」语义都是对的
-  const raw = location.hash.replace(/^#\/?/, '');
-  appStack = ['#/home'];
-  if (raw && raw !== 'home') appStack.push('#/' + raw);
+  // navStack 不初始化：刷新/深链打开时它应该是空的，
+  // 此时 in-app 返回用 location.replace 而不是 history.back
   try {
     await refresh();
     render();
@@ -1076,11 +1112,14 @@ async function boot() {
   }
 }
 
-window.addEventListener('hashchange', () => {
-  // 同步 appStack：用户在 Safari 地址栏手输 URL、跨标签同步、外部深链等场景
-  // 也会触发 hashchange 而不走 boot，这里兜一下；自己 replace 的同一 hash 不会重复 push
-  const cur = '#/' + (location.hash.replace(/^#\/?/, '') || 'home');
-  if (appStack[appStack.length - 1] !== cur) appStack.push(cur);
+window.addEventListener('hashchange', render);
+// popstate 同步 navStack：不管谁触发的历史切换（系统右滑、我们的 back/finishTo），
+// history 真正换了就会 fire popstate——我们在 popstate 里 pop navStack，让栈和浏览器历史始终一致。
+// 顺带：如果刚好落在首页，renderHome() 里的 ensureHomeGuard 会处理守卫。
+// 关键：忽略 go() 自己触发的 popstate（Chrome 在 location.hash= 变化时也会 fire popstate），
+// 只有「回退」（location.hash ≠ go() 设置的 hash）才 pop。
+window.addEventListener('popstate', () => {
+  if (location.hash !== _lastGoHash && navStack.length > 0) navStack.pop();
   render();
 });
 window.addEventListener('DOMContentLoaded', () => {

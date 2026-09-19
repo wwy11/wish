@@ -1,4 +1,4 @@
-const CACHE = 'wish-v5';
+const CACHE = 'wish-v6';
 const ASSETS = [
   './',
   './index.html',
