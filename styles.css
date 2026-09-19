@@ -333,6 +333,70 @@ body {
   height: 26px;
 }
 
+/* ---------- 滑动行：右滑露出重新评分 / 左滑露出删除 ---------- */
+/* 这里的位置宽度必须和 app.js 的 LEAD_W(168) / DEL_W(84) 对齐：
+   JS 只负责算位移，摆位交给 CSS。 */
+.sw {
+  position: relative;
+  overflow: hidden;
+  margin-bottom: 10px;
+  border-radius: 14px;
+  touch-action: pan-y;
+}
+
+/* 卡片盖在滑出层上面，靠 translateX 让出底下的评分条 / 删除键 */
+.sw > .card {
+  position: relative;
+  z-index: 2;
+  margin-bottom: 0;
+  touch-action: pan-y;
+  transition: transform 0.2s ease;
+  will-change: transform;
+}
+
+/* 手指拖动中：关掉过渡，卡片才会贴着手指走（松手时 JS 会摘掉这个类，吸附动画才生效） */
+.sw.dragging > .card {
+  transition: none;
+}
+
+.sw-lead,
+.sw-del {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 从左往右滑出来的一层：重新评分 */
+.sw-lead {
+  left: 0;
+  width: 168px;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--soft);
+}
+
+.sw-lead-label {
+  font-size: 11px;
+  color: var(--text3);
+}
+
+/* 从右往左滑出来的一层：删除 */
+.sw-del {
+  right: 0;
+  width: 84px;
+  border: 0;
+  border-radius: 0 14px 14px 0; /* 内侧留直角，外侧由 .sw 的圆角裁掉 */
+  background: var(--danger);
+  color: #fff;
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
 /* ---------- 星星 ---------- */
 .stars {
   display: inline-flex;
@@ -353,6 +417,10 @@ body {
 
 .star.on {
   color: var(--star-on);
+}
+
+.stars.ro .star {
+  cursor: default; /* 列表卡片上的星星只展示，点了不算打分 */
 }
 
 .stars.big .star,

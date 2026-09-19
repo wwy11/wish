@@ -47,6 +47,12 @@ const GEAR =
   '<path d="M12 2.6v2.3M12 19.1v2.3M2.6 12h2.3M19.1 12h2.3M4.4 7.3l2 1.15M17.6 15.55l2 1.15M4.4 16.7l2-1.15M17.6 8.45l2-1.15"/>' +
   '</svg>';
 
+/* 排序图标：三条不等长的横线 + 向下箭头，比字符直观 */
+const SORT_ICON =
+  '<svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">' +
+  '<path d="M4 7h11M4 12h8M4 17h5"/><path d="M17.5 10.5V17m0 0l-2.2-2.2M17.5 17l2.2-2.2"/>' +
+  '</svg>';
+
 /* ============ 状态 ============ */
 let items = [];
 let pulsesByItem = Object.create(null);
@@ -89,7 +95,7 @@ function toast(msg) {
 
 /* ============ 设置 ============ */
 const SETTINGS_KEY = 'wish-settings';
-const DEFAULT_SETTINGS = { staleDays: 7, coolStar: 2, theme: 'auto' };
+const DEFAULT_SETTINGS = { staleDays: 7, coolStar: 2, theme: 'auto', sort: 'default' };
 let settings = Object.assign({}, DEFAULT_SETTINGS);
 
 function loadSettings() {
@@ -100,6 +106,7 @@ function loadSettings() {
   if (!STALE_OPTIONS.some((o) => o.d === settings.staleDays)) settings.staleDays = DEFAULT_SETTINGS.staleDays;
   if (!COOL_OPTIONS.some((o) => o.s === settings.coolStar)) settings.coolStar = DEFAULT_SETTINGS.coolStar;
   if (['auto', 'light', 'dark'].indexOf(settings.theme) < 0) settings.theme = 'auto';
+  if (['default', 'star', 'recent'].indexOf(settings.sort) < 0) settings.sort = DEFAULT_SETTINGS.sort;
 }
 
 function saveSettings() {
@@ -154,12 +161,22 @@ async function refresh() {
 }
 
 /* ============ 组件 ============ */
+/** 可点评分星（详情页、批量复评、冷却页、右滑露出的评分条用） */
 function starsHtml(it, big) {
   const s = starOf(heatOf(it));
   let out = `<span class="stars${big ? ' big' : ''}">`;
   for (let i = 1; i <= 5; i++) {
     out += `<button type="button" class="star${i <= s ? ' on' : ''}" data-rate="${esc(it.id)}" data-star="${i}" aria-label="打 ${i} 星">★</button>`;
   }
+  return out + '</span>';
+}
+
+/** 首页卡片上的星级：只展示、不吃点击 —— 打分入口挪到「右滑露出的评分条」，
+    这样浏览时不可能误触改分（旧版的 40px 星星带就贴在名字下面，一点就中）。 */
+function starsHtmlStatic(it) {
+  const s = starOf(heatOf(it));
+  let out = '<span class="stars ro">';
+  for (let i = 1; i <= 5; i++) out += `<span class="star${i <= s ? ' on' : ''}">★</span>`;
   return out + '</span>';
 }
 
@@ -208,7 +225,12 @@ function cardHtml(it) {
   else if (delta < 0) meta.push(`-${dStar}★`);
   if (cooled) meta.push('已冷却');
   else if (isStale(it)) meta.push('待复评');
-  return `<article class="card${cooled ? ' cooled' : ''}" data-open="${esc(it.id)}">
+  return `<div class="sw" data-sw="${esc(it.id)}">
+    <div class="sw-lead">
+      <span class="sw-lead-label">重新评分</span>
+      ${starsHtml(it)}
+    </div>
+    <article class="card${cooled ? ' cooled' : ''}" data-open="${esc(it.id)}">
     <div class="card-row">
       ${thumbHtml(it)}
       <div class="card-main">
@@ -216,25 +238,64 @@ function cardHtml(it) {
           <span class="name">${esc(it.name)}</span>
           <span class="price">${it.price ? money(it.price) : ''}</span>
         </div>
-        <div class="card-line2">${starsHtml(it)}<span class="meta">${esc(meta.join(' · '))}</span></div>
+        <div class="card-line2">${starsHtmlStatic(it)}<span class="meta">${esc(meta.join(' · '))}</span></div>
       </div>
     </div>
     <div class="card-spark">${Spark.line(pulsesOf(it.id), { color })}</div>
-  </article>`;
+  </article>
+    <button type="button" class="sw-del" data-del="${esc(it.id)}" aria-label="删除">删除</button>
+  </div>`;
+}
+
+/* ============ 排序 ============ */
+/* 默认不引入新排序（记录少、也不想因为改个分就跳位），
+   另外两种排序由用户从顶栏按需切换，选择记在 settings 里。 */
+const nameCmp = (a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh-Hans-CN');
+const updAt = (it) => Number(it.updatedAt) || Number(it.createdAt) || 0;
+
+function sortList(list) {
+  const out = list.slice();
+  if (settings.sort === 'star') {
+    // 星级降序 → 同星级按最近修改 → 名称兜底
+    out.sort((a, b) => starOf(heatOf(b)) - starOf(heatOf(a)) || updAt(b) - updAt(a) || nameCmp(a, b));
+  } else if (settings.sort === 'recent') {
+    // 最近修改优先 → 名称兜底
+    out.sort((a, b) => updAt(b) - updAt(a) || nameCmp(a, b));
+  } else {
+    // 默认：冷却的沉底，其余按热度降序
+    out.sort((a, b) => {
+      const ca = isCooled(a) ? 1 : 0;
+      const cb = isCooled(b) ? 1 : 0;
+      if (ca !== cb) return ca - cb;
+      return heatOf(b) - heatOf(a);
+    });
+  }
+  return out;
+}
+
+function openSortSheet() {
+  const cur = settings.sort;
+  const mark = (k) => (cur === k ? '✓ ' : '');
+  sheet('排序方式', '只改首页列表的排列，不动任何记录。', [
+    { label: mark('default') + '默认（冷却沉底、热度高的在前）', onClick: () => setSort('default') },
+    { label: mark('star') + '星级优先（同星级看最近修改）', onClick: () => setSort('star') },
+    { label: mark('recent') + '最近修改优先', onClick: () => setSort('recent') },
+    { label: '取消' },
+  ]);
+}
+
+function setSort(k) {
+  settings.sort = k;
+  saveSettings();
+  renderHome();
+  toast(k === 'default' ? '已按默认顺序' : k === 'star' ? '已按星级排序' : '已按最近修改排序');
 }
 
 /* ============ 页面：首页 ============ */
 function renderHome() {
   const app = $('#app');
   const wish = items.filter((i) => i.status === 'wish');
-  const list = items.filter((i) => i.status === tab);
-  // 冷却的沉底，其余按热度降序
-  list.sort((a, b) => {
-    const ca = isCooled(a) ? 1 : 0;
-    const cb = isCooled(b) ? 1 : 0;
-    if (ca !== cb) return ca - cb;
-    return heatOf(b) - heatOf(a);
-  });
+  const list = sortList(items.filter((i) => i.status === tab));
   const saved = items.filter((i) => i.status === 'dropped').reduce((s, i) => s + (Number(i.price) || 0), 0);
   const spent = items.filter((i) => i.status === 'bought').reduce((s, i) => s + (Number(i.price) || 0), 0);
 
@@ -248,6 +309,7 @@ function renderHome() {
     <header class="topbar">
       <h1 class="title">种草</h1>
       <div class="topbar-actions">
+        <button class="icon-btn${settings.sort !== 'default' ? ' on' : ''}" data-sort aria-label="排序">${SORT_ICON}</button>
         <button class="icon-btn" data-nav="settings" aria-label="设置">${GEAR}</button>
         <button class="icon-btn" data-nav="add" aria-label="添加">+</button>
       </div>
@@ -518,6 +580,7 @@ function renderForm(id) {
           it.photo = formPhoto;
           it.photoThumb = formThumb;
         }
+        it.updatedAt = Date.now();
         await DB.putItem(it);
         toast('已保存');
       } else {
@@ -531,6 +594,7 @@ function renderForm(id) {
           photoThumb: formThumb,
           note: String(fd.get('note') || '').trim(),
           createdAt: Date.now(),
+          updatedAt: Date.now(),
           status: 'wish',
           decidedAt: null,
           satisfaction: null,
@@ -878,6 +942,9 @@ function sanitizeItem(r) {
     photo && typeof r.photoThumb === 'string' && r.photoThumb.indexOf('data:image/') === 0 && r.photoThumb.length < 262144
       ? r.photoThumb
       : null;
+  // updatedAt 是后加字段（老数据/老导出文件里没有），缺了就退回 createdAt，别让排序拿到 NaN
+  const createdAt = Number.isFinite(Number(r.createdAt)) ? Number(r.createdAt) : Date.now();
+  const updatedAt = Number.isFinite(Number(r.updatedAt)) ? Number(r.updatedAt) : createdAt;
   return {
     id: typeof r.id === 'string' && r.id ? r.id : uid(),
     name: name.slice(0, 60),
@@ -887,7 +954,8 @@ function sanitizeItem(r) {
     photo,
     photoThumb: thumb,
     note: typeof r.note === 'string' ? r.note.slice(0, 500) : '',
-    createdAt: Number.isFinite(Number(r.createdAt)) ? Number(r.createdAt) : Date.now(),
+    createdAt,
+    updatedAt,
     status: ['wish', 'bought', 'dropped'].indexOf(r.status) >= 0 ? r.status : 'wish',
     decidedAt: Number.isFinite(Number(r.decidedAt)) ? Number(r.decidedAt) : null,
     satisfaction: Number.isFinite(Number(r.satisfaction)) ? Number(r.satisfaction) : null,
@@ -970,14 +1038,22 @@ async function rate(id, star) {
       toast(`记下了 · ${star}★`);
     }
     await refresh();
+    // 打分也算「更新了这条记录」（按最近修改排序时用得上）
+    const freshIt = items.find((i) => i.id === id);
+    if (freshIt) {
+      freshIt.updatedAt = Date.now();
+      await DB.putItem(freshIt);
+    }
+    closeAllSwipes(); // 从滑开的评分条打完分，把行收回去
 
-    // 首页只替换这一张卡，不整页重排 —— 否则刚点完的卡片会立刻从手指底下跳走，
-    // 用户会不确定自己刚才点的是哪一条。重排留到下次进入首页时自然发生。
+    // 首页只替换这一整行（cardHtml 现在返回带 .sw 外壳的整行），不整页重排 ——
+    // 否则刚点完的卡片会立刻从手指底下跳走，用户会不确定自己刚才点的是哪一条。
+    // 重排留到下次进入首页时自然发生。
     const onHome = !!$('#reminders');
-    const card = document.querySelector('.card[data-open="' + id + '"]');
+    const row = document.querySelector('.sw[data-sw="' + id + '"]');
     const fresh = items.find((i) => i.id === id);
-    if (onHome && card && fresh) {
-      card.outerHTML = cardHtml(fresh);
+    if (onHome && row && fresh) {
+      row.outerHTML = cardHtml(fresh);
       updateReminders();
     } else {
       render(); // 复评页/冷却页要的是「打完就移出列表」，该重排就重排
@@ -992,20 +1068,33 @@ async function setStatus(id, status) {
   if (!it) return;
   it.status = status;
   it.decidedAt = status === 'wish' ? null : Date.now();
+  it.updatedAt = Date.now();
   await DB.putItem(it);
   await refresh();
   toast(status === 'bought' ? '已标记为入手' : status === 'dropped' ? '放下了，钱省下来了' : '重新种草');
   render();
 }
 
-async function removeItem(id) {
+/** 删除走底部弹层二次确认（滑动露出的「删除」已经是一道，这里再确认一次） */
+function removeItem(id) {
   const it = items.find((i) => i.id === id);
   if (!it) return;
-  if (!confirm(`删除「${it.name}」？它的打分记录会一起删掉。`)) return;
-  await DB.removeItem(id);
-  await refresh();
-  toast('已删除');
-  finishTo('home');
+  sheet(`删除「${it.name}」？`, '它的打分记录会一起删掉，删了就找不回来。', [
+    { label: '删除', danger: true, onClick: () => doRemoveItem(id) },
+    { label: '取消' },
+  ]);
+}
+
+async function doRemoveItem(id) {
+  try {
+    await DB.removeItem(id);
+    await refresh();
+    closeAllSwipes();
+    toast('已删除');
+    finishTo('home');
+  } catch (err) {
+    toast('删除失败：' + (err && err.message ? err.message : '未知错误'));
+  }
 }
 
 /* ============ 路由 ============ */
@@ -1066,11 +1155,124 @@ function renderError(err) {
   $('#retry').addEventListener('click', () => boot());
 }
 
+/* ============ 列表项的滑动操作 ============ */
+/* 右滑（从左往右）露出重新评分，左滑（从右往左）露出删除。
+   写法照抄饮记的 attachSwipe，扩展成双向 —— 饮记只有左滑删除那一边。
+   两个必须处理的点：
+   ① 轴锁定：横move才接管，否则纵向滚动会被吃掉；
+   ② 屏幕左缘 ~28px 起手要让给 iOS 的返回手势，否则滑到一半被系统截走。 */
+const LEAD_W = 168; // 右侧滑出来的评分条宽度
+const DEL_W = 84;   // 左侧滑出来的删除按钮宽度
+const EDGE_W = 28;  // 左缘保留区
+let sw = null;      // 进行中的手势
+let swipeAt = 0;    // 刚滑完的时间戳：用来吃掉紧随其后的 click
+
+function swCard(el) {
+  return el ? el.querySelector('.card') : null;
+}
+function closeSwipe(el) {
+  if (!el) return;
+  el.classList.remove('open');
+  el.classList.remove('dragging');
+  const c = swCard(el);
+  if (c) c.style.transform = '';
+}
+function closeAllSwipes() {
+  document.querySelectorAll('.sw.open').forEach(closeSwipe);
+}
+function settleSwipe(el, dx) {
+  const c = swCard(el);
+  if (!c) return;
+  if (dx >= LEAD_W / 2) {
+    closeAllSwipes();
+    el.classList.add('open');
+    el.dataset.dir = 'lead';
+    c.style.transform = `translateX(${LEAD_W}px)`;
+  } else if (dx <= -DEL_W / 2) {
+    closeAllSwipes();
+    el.classList.add('open');
+    el.dataset.dir = 'del';
+    c.style.transform = `translateX(${-DEL_W}px)`;
+  } else {
+    closeSwipe(el);
+  }
+}
+
+function bindSwipe(app) {
+  const onStart = (e) => {
+    const el = e.target.closest && e.target.closest('.sw');
+    if (!el) return;
+    const t = e.touches ? e.touches[0] : e;
+    const open = el.classList.contains('open');
+    const base = open ? (el.dataset.dir === 'lead' ? LEAD_W : -DEL_W) : 0;
+    sw = { el, x0: t.clientX, y0: t.clientY, dx: base, base, horiz: false, decided: false, edge: t.clientX < EDGE_W };
+  };
+  const onMove = (e) => {
+    if (!sw) return;
+    const t = e.touches ? e.touches[0] : e;
+    const mx = t.clientX - sw.x0;
+    const my = t.clientY - sw.y0;
+    if (!sw.decided) {
+      if (Math.abs(mx) < 6 && Math.abs(my) < 6) return;
+      sw.decided = true;
+      sw.horiz = Math.abs(mx) > Math.abs(my) * 1.2;
+      // 左缘起手还想往右滑 → 整段让给系统返回手势，我们不接管
+      if (sw.horiz && sw.edge && mx > 0) {
+        sw = null;
+        return;
+      }
+    }
+    if (!sw.horiz) return;
+    if (e.cancelable && e.preventDefault) e.preventDefault();
+    sw.el.classList.add('dragging'); // 拖动期间关掉 transition，卡片才会贴着手指走
+    const dx = Math.max(-DEL_W, Math.min(LEAD_W, sw.base + mx));
+    sw.dx = dx;
+    const c = swCard(sw.el);
+    if (c) c.style.transform = `translateX(${dx}px)`;
+  };
+  const onEnd = () => {
+    if (!sw) return;
+    const s = sw;
+    sw = null;
+    if (!s.horiz) return;
+    s.el.classList.remove('dragging'); // 先恢复 transition，settleSwipe 的位移才会有吸附动画
+    swipeAt = Date.now(); // 这次不算点击
+    settleSwipe(s.el, s.dx);
+  };
+  const onCancel = () => {
+    if (!sw) return;
+    const s = sw;
+    sw = null;
+    s.el.classList.remove('dragging');
+    settleSwipe(s.el, s.base);
+  };
+  app.addEventListener('touchstart', onStart, { passive: true });
+  app.addEventListener('touchmove', onMove, { passive: false });
+  app.addEventListener('touchend', onEnd);
+  app.addEventListener('touchcancel', onCancel);
+  // 桌面调试用鼠标也能滑（同饮记）
+  app.addEventListener('mousedown', (e) => {
+    if (!e.target.closest || !e.target.closest('.sw')) return;
+    onStart({ touches: [e], target: e.target });
+    const mm = (ev) => onMove({ touches: [ev], cancelable: false });
+    const mu = () => {
+      onEnd();
+      window.removeEventListener('mousemove', mm);
+      window.removeEventListener('mouseup', mu);
+    };
+    window.addEventListener('mousemove', mm);
+    window.addEventListener('mouseup', mu);
+  });
+}
+
 /* ============ 事件委托 ============ */
 function bindEvents() {
   const app = $('#app');
   app.addEventListener('click', async (e) => {
     const t = e.target;
+
+    // 刚滑动过 → 吃掉这次 click，否则滑完会顺带把详情页打开
+    if (Date.now() - swipeAt < 350) return;
 
     const rateBtn = t.closest('button[data-rate]');
     if (rateBtn) {
@@ -1078,6 +1280,7 @@ function bindEvents() {
       rate(rateBtn.dataset.rate, Number(rateBtn.dataset.star));
       return;
     }
+    if (t.closest('[data-sort]')) return openSortSheet();
     const navEl = t.closest('[data-nav]');
     if (navEl) return go(navEl.dataset.nav);
     const delEl = t.closest('[data-del]');
@@ -1092,9 +1295,13 @@ function bindEvents() {
       return renderHome();
     }
     if (t.closest('[data-back]')) return back();
+    // 有行滑开时，点卡片只把它收回去，不进详情（iOS 列表的惯例）
+    const swEl = t.closest('.sw');
+    if (swEl && swEl.classList.contains('open')) return closeSwipe(swEl);
     const openEl = t.closest('[data-open]');
     if (openEl) return go('item/' + openEl.dataset.open);
   });
+  bindSwipe(app);
 }
 
 /* ============ 启动 ============ */
@@ -1136,6 +1343,25 @@ async function backfillThumbs() {
   if (changed && onHome()) render();
 }
 
+/** 老数据没有 updatedAt（那时候只有 createdAt）：用「加入时间」和「最后一次打分」里更晚的那个补上，
+    这样「最近修改」排序对老记录也说得通（打过分的排在没碰过的前面）。
+    幂等：补过就不再进这个列表。 */
+async function backfillUpdatedAt() {
+  const need = items.filter((i) => !Number(i.updatedAt));
+  if (!need.length) return;
+  let changed = false;
+  for (const it of need) {
+    const ps = pulsesOf(it.id);
+    const lastAt = ps.length ? Number(ps[ps.length - 1].at) || 0 : 0;
+    it.updatedAt = Math.max(Number(it.createdAt) || 0, lastAt) || Date.now();
+    try {
+      await DB.putItem(it);
+      changed = true;
+    } catch (e) {} // 个别失败不影响其他条目，下次启动会重试
+  }
+  if (changed) await refresh();
+}
+
 async function boot() {
   loadSettings();
   applyTheme(); // 首帧脚本已经定过一次，这里再同步一遍（顺带处理设置页改完主题的情况）
@@ -1144,6 +1370,7 @@ async function boot() {
   try {
     await refresh();
     await migrateCats(); // 旧分类先并到「其他」，再渲染，避免界面闪旧值
+    await backfillUpdatedAt(); // 老记录补 updatedAt，排序才有得依
     render();
     backfillThumbs(); // 不 await：后台补旧数据的小图，别拖慢开屏
   } catch (err) {
