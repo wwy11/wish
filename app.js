@@ -57,13 +57,6 @@ let tab = 'wish';
    （从 coffee 抄的同一思路） */
 let navStack = [];
 
-/* 首页快照缓存：离开首页时把 DOM 原样抱走，回来时数据没变就整块放回。
-   背景实测：back 回首页每次都整页重建 innerHTML，iPhone 上 20 张卡的
-   base64 字符串解析 + 图片重新解码就是好几秒空屏。复用同一批节点，
-   解码缓存还在，恢复是瞬间的。数据版本号在 refresh() 里递增作废缓存。 */
-let homeCache = null; // { frag: DocumentFragment, scrollY, dataVer }
-let dataVer = 0;
-
 /* ============ 工具 ============ */
 const $ = (sel, root) => (root || document).querySelector(sel);
 const esc = (s) =>
@@ -152,7 +145,6 @@ const deltaOf = (it) => {
 const isCooled = (it) => it.status === 'wish' && heatOf(it) <= settings.coolStar * 20;
 
 async function refresh() {
-  dataVer++; // 数据变了，首页快照作废（所有改数据的路径都汇经这里）
   const snap = await DB.snapshot();
   items = snap.items;
   pulsesByItem = Object.create(null);
@@ -172,7 +164,10 @@ function starsHtml(it, big) {
 }
 
 function thumbHtml(it) {
-  if (it.photo) return `<img class="thumb" src="${esc(it.photo)}" alt="" decoding="async" />`;
+  // 列表只吃小图（photoThumb，160px）。拿 1000px 原图塞进 48px 的格子，
+  // iPhone 每次回首页都要重新解析+解码 N 张大图 —— 这才是「几秒空屏」的真凶。
+  const src = it.photoThumb || it.photo;
+  if (src) return `<img class="thumb" src="${esc(src)}" alt="" decoding="async" />`;
   return `<div class="thumb thumb-ph">${esc((it.name || '?').trim().slice(0, 1))}</div>`;
 }
 
@@ -229,29 +224,8 @@ function cardHtml(it) {
 }
 
 /* ============ 页面：首页 ============ */
-/** 离开首页时抱走 DOM；回来时数据没变就原样放回（图片解码缓存还在，瞬间恢复） */
-function captureHome() {
-  const app = $('#app');
-  if (!app.firstChild) return;
-  const frag = document.createDocumentFragment();
-  while (app.firstChild) frag.appendChild(app.firstChild);
-  homeCache = { frag, scrollY: window.scrollY, dataVer };
-}
-
-function restoreHome() {
-  if (!homeCache || homeCache.dataVer !== dataVer) return false;
-  if (!homeCache.frag || !homeCache.frag.firstChild) return false; // 已被上次恢复用掉，走重建
-  const app = $('#app');
-  app.textContent = '';
-  app.appendChild(homeCache.frag);
-  window.scrollTo(0, homeCache.scrollY);
-  ensureHomeGuard();
-  return true;
-}
-
 function renderHome() {
   const app = $('#app');
-  if (restoreHome()) return;
   const wish = items.filter((i) => i.status === 'wish');
   const list = items.filter((i) => i.status === tab);
   // 冷却的沉底，其余按热度降序
@@ -293,8 +267,6 @@ function renderHome() {
 
     <div class="list">${list.length ? list.map(cardHtml).join('') : `<div class="empty">${esc(emptyText)}</div>`}</div>
   `;
-
-  ensureHomeGuard();
 }
 
 /* ============ 页面：批量复评 ============ */
@@ -451,13 +423,15 @@ function renderItem(id) {
 }
 
 /* ============ 页面：添加 / 编辑 ============ */
-let formPhoto = null; // 待保存的图（dataURL）
+let formPhoto = null; // 待保存的大图（dataURL，最长边 1000px）
+let formThumb = null; // 对应的列表小图（160px）
 let formPhotoDirty = false;
 
 function renderForm(id) {
   const app = $('#app');
   const it = id ? items.find((i) => i.id === id) : null;
   formPhoto = it ? it.photo || null : null;
+  formThumb = it ? it.photoThumb || null : null;
   formPhotoDirty = false;
   const cur = it ? starOf(heatOf(it)) : 3;
 
@@ -540,7 +514,10 @@ function renderForm(id) {
         it.category = normCat(fd.get('category'));
         it.url = String(fd.get('url') || '').trim();
         it.note = String(fd.get('note') || '').trim();
-        if (formPhotoDirty) it.photo = formPhoto;
+        if (formPhotoDirty) {
+          it.photo = formPhoto;
+          it.photoThumb = formThumb;
+        }
         await DB.putItem(it);
         toast('已保存');
       } else {
@@ -551,6 +528,7 @@ function renderForm(id) {
           category: normCat(fd.get('category')),
           url: String(fd.get('url') || '').trim(),
           photo: formPhoto,
+          photoThumb: formThumb,
           note: String(fd.get('note') || '').trim(),
           createdAt: Date.now(),
           status: 'wish',
@@ -583,10 +561,11 @@ function renderForm(id) {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
     try {
-      const dataUrl = await compressImage(file);
-      formPhoto = dataUrl;
+      const out = await compressImage(file);
+      formPhoto = out.full;
+      formThumb = out.thumb;
       formPhotoDirty = true;
-      $('#photo-preview').innerHTML = `<img src="${esc(dataUrl)}" alt="" />`;
+      $('#photo-preview').innerHTML = `<img src="${esc(out.full)}" alt="" />`;
     } catch (err) {
       toast('图片处理失败');
     }
@@ -594,6 +573,7 @@ function renderForm(id) {
 
   $('#photo-clear').addEventListener('click', () => {
     formPhoto = null;
+    formThumb = null;
     formPhotoDirty = true;
     $('#photo-preview').innerHTML = '';
   });
@@ -606,23 +586,38 @@ function compressImage(file) {
     const img = new Image();
     img.onload = () => {
       URL.revokeObjectURL(url);
-      const max = 1000;
-      let w = img.width;
-      let h = img.height;
-      const scale = Math.min(1, max / Math.max(w, h));
-      w = Math.round(w * scale);
-      h = Math.round(h * scale);
-      const c = document.createElement('canvas');
-      c.width = w;
-      c.height = h;
-      c.getContext('2d').drawImage(img, 0, 0, w, h);
-      resolve(c.toDataURL('image/jpeg', 0.75));
+      // 同时出两张：大图给详情页，小图给列表（列表塞大图是 iOS 上回首页卡顿的真凶）
+      resolve({ full: scaleTo(img, 1000, 0.75), thumb: scaleTo(img, 160, 0.6) });
     };
     img.onerror = () => {
       URL.revokeObjectURL(url);
       reject(new Error('图片读取失败'));
     };
     img.src = url;
+  });
+}
+
+/** 把已加载的 <img> 缩到最长边 max、jpeg quality，返回 dataURL */
+function scaleTo(img, max, quality) {
+  let w = img.width;
+  let h = img.height;
+  const scale = Math.min(1, max / Math.max(w, h));
+  w = Math.round(w * scale);
+  h = Math.round(h * scale);
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  c.getContext('2d').drawImage(img, 0, 0, w, h);
+  return c.toDataURL('image/jpeg', quality);
+}
+
+/** 用已有的 dataURL 现生成小图（给旧数据补 photoThumb 用） */
+function makeThumb(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(scaleTo(img, 160, 0.6));
+    img.onerror = () => reject(new Error('缩略图生成失败'));
+    img.src = dataUrl;
   });
 }
 
@@ -876,13 +871,21 @@ function sanitizeItem(r) {
   const pRaw = r.price;
   const pNum = Number(pRaw);
   const price = pRaw == null || String(pRaw).trim() === '' || !Number.isFinite(pNum) || pNum < 0 ? null : pNum;
+  const photo = typeof r.photo === 'string' && r.photo.indexOf('data:image/') === 0 ? r.photo : null;
+  // 小图：格式合法且体积正常才收（几十 KB 级）。异常大的说明不是 160px 缩略图，
+  // 宁可丢掉——启动时的 backfillThumbs() 会按大图重新生成。
+  const thumb =
+    photo && typeof r.photoThumb === 'string' && r.photoThumb.indexOf('data:image/') === 0 && r.photoThumb.length < 262144
+      ? r.photoThumb
+      : null;
   return {
     id: typeof r.id === 'string' && r.id ? r.id : uid(),
     name: name.slice(0, 60),
     price,
     category: normCat(r.category),
     url: typeof r.url === 'string' ? r.url.trim().slice(0, 2000) : '',
-    photo: typeof r.photo === 'string' && r.photo.indexOf('data:image/') === 0 ? r.photo : null,
+    photo,
+    photoThumb: thumb,
     note: typeof r.note === 'string' ? r.note.slice(0, 500) : '',
     createdAt: Number.isFinite(Number(r.createdAt)) ? Number(r.createdAt) : Date.now(),
     status: ['wish', 'bought', 'dropped'].indexOf(r.status) >= 0 ? r.status : 'wish',
@@ -911,6 +914,7 @@ async function doImport(inItems, inPulses, replace) {
     else await DB.mergeAll(inItems, inPulses);
     await refresh();
     render();
+    backfillThumbs(); // 导入的旧数据同样补小图
     toast(replace ? '已覆盖导入' : '已合并导入');
   } catch (err) {
     toast('导入失败：' + (err && err.message ? err.message : '未知错误'));
@@ -1006,41 +1010,21 @@ async function removeItem(id) {
 
 /* ============ 路由 ============ */
 /**
- * 导航用浏览器原生历史（push），不是虚拟栈。原因：
- *   - 子页面系统右滑必须能回首页——v5 那种全程 replace 会把这条堵死；
- *   - 咖啡（饮记）就是这套：go() push、goBack() 走 history.back()，
- *     子页面右滑天然可用、首页在栈底天然没东西可滑。
- * 我们自己维护 navStack 来判断「有没有上一页」：刷新/深链打开时它是空的，
- * 退无可退就 location.replace 原地换页，不会触发系统「退出 app」。
- *
- * 首页守卫（ensureHomeGuard）只解决一件事：跨 session 累积在浏览器栈里的
- * 脏历史（比如旧版本/其他 tab 留下的「首页底下压着详情」）会被系统右滑踩到。
- * 子页面之间干净——go() 总是从当前页 push，back() 走原生历史，不会制造脏条目。
+ * 导航完全照抄饮记（同项目、真机验证过丝滑）：原生历史 + navStack 判断有没有上一页。
+ *   - go() 一律 push（location.hash = ）：首页永远留在栈底，子页面右滑天然能回；
+ *     首页底下没有条目，系统右滑自然什么都不做——不需要守卫。
+ *   - back()/finishTo() 有上一页就 history.back()，退无可退（刷新/深链）才 replace 原地换页。
+ * 教训（v6/v7）：从首页出发用 replace + pushState 垫守卫，等于给了首页一个假「上一页」，
+ * 右滑会真的发生一次历史切换——iOS 上就是「空屏一下，然后又回一次首页」。
  */
 function go(hash) {
-  // 标记自己刚改的 hash：Chrome 在 location.hash 变化时也会触发 popstate（不符合规范），
-  // 没有这个标记 popstate 监听器会把刚 push 进 navStack 的项又 pop 掉。
-  // 真正是「回退」（系统右滑 / 我们的 history.back）时 location.hash 必然不等于这个标记。
-  _lastGoHash = '#/' + hash;
-  const cur = (location.hash || '#/home').replace(/^#\/?/, '') || 'home';
-  if (cur === 'home') {
-    /* 从首页出发 → replace：保证 history.back() 自然回到首页。
-       这样「首页→detail→回→首页→detail(另一条)→回」也不会在栈里堆 detail 副本 */
-    navStack.push('home');
-    captureHome(); // 抱走首页 DOM，back 回来时直接放回，不整页重建
-    location.replace('#/' + hash);
-  } else {
-    /* 从子页面出发 → push：让 history.back() 回到上一层子页面（编辑→详情、详情→冷却等） */
-    navStack.push(cur);
-    location.hash = '#/' + hash;
-  }
+  navStack.push((location.hash || '#/home').replace(/^#\/?/, '') || 'home');
+  location.hash = '#/' + hash;
 }
 
-let _lastGoHash = '';
-
 function back() {
-  // 不需要手动 pop navStack：popstate 监听会自动同步
   if (navStack.length > 0) {
+    navStack.pop();
     history.back();
   } else {
     location.replace('#/home');
@@ -1053,26 +1037,11 @@ function back() {
  */
 function finishTo(fallback) {
   if (navStack.length > 0) {
-    history.back(); // popstate 会同步 pop navStack
+    navStack.pop();
+    history.back();
   } else {
     location.replace('#/' + fallback);
   }
-}
-
-/** 首页守卫：进首页时如果当前条目不是守卫，就垫一层 pushState。
-    垫一次挡一次右滑；同一会话内重复进首页不会重复垫（有标记就跳过）。 */
-const onHomeHash = () => {
-  const h = location.hash.replace(/^#\/?/, '');
-  return !h || h === 'home';
-};
-
-function ensureHomeGuard() {
-  if (!onHomeHash()) return;
-  try {
-    const st = history.state;
-    if (st && st.wishGuard) return;
-    history.pushState({ wishGuard: true }, '', location.href);
-  } catch (e) {} // 极端环境 pushState 可能抛错，不能因此挡住首页渲染
 }
 
 function render() {
@@ -1129,6 +1098,28 @@ function bindEvents() {
 }
 
 /* ============ 启动 ============ */
+const onHome = () => {
+  const h = location.hash.replace(/^#\/?/, '');
+  return !h || h === 'home';
+};
+
+/** 旧数据没有 photoThumb（早期版本把 1000px 大图直接塞进列表）：启动后在后台补生成，
+    补完静默刷一次首页——列表图片体积从几 MB 掉到几十 KB，回首页才不卡。
+    只在首页刷新，别打断用户正在填的表单。 */
+async function backfillThumbs() {
+  const need = items.filter((i) => i.photo && !i.photoThumb);
+  if (!need.length) return;
+  let changed = false;
+  for (const it of need) {
+    try {
+      it.photoThumb = await makeThumb(it.photo);
+      await DB.putItem(it);
+      changed = true;
+    } catch (e) {} // 个别图坏了不能拖垮其余
+  }
+  if (changed && onHome()) render();
+}
+
 async function boot() {
   loadSettings();
   applyTheme(); // 首帧脚本已经定过一次，这里再同步一遍（顺带处理设置页改完主题的情况）
@@ -1137,32 +1128,16 @@ async function boot() {
   try {
     await refresh();
     render();
+    backfillThumbs(); // 不 await：后台补旧数据的小图，别拖慢开屏
   } catch (err) {
     renderError(err);
   }
 }
 
-/* 同一次导航 popstate 和 hashchange 会各 fire 一次（浏览器行为），不合并的话
-   render 每次跑两遍，首页快照恢复也会被第二遍打穿（frag 已被搬空 → 全量重建）。
-   setTimeout(0) 把同一段事件里的多次触发并成一次。 */
-let renderTimer = 0;
-function scheduleRender() {
-  if (renderTimer) return;
-  renderTimer = setTimeout(() => {
-    renderTimer = 0;
-    render();
-  }, 0);
-}
-window.addEventListener('hashchange', scheduleRender);
-// popstate 同步 navStack：不管谁触发的历史切换（系统右滑、我们的 back/finishTo），
-// history 真正换了就会 fire popstate——我们在 popstate 里 pop navStack，让栈和浏览器历史始终一致。
-// 顺带：如果刚好落在首页，renderHome() 里的 restoreHome/ensureHomeGuard 会处理守卫。
-// 关键：忽略 go() 自己触发的 popstate（Chrome 在 location.hash= 变化时也会 fire popstate），
-// 只有「回退」（location.hash ≠ go() 设置的 hash）才 pop。
-window.addEventListener('popstate', () => {
-  if (location.hash !== _lastGoHash && navStack.length > 0) navStack.pop();
-  scheduleRender();
-});
+/* 只有 hashchange 一个渲染入口（同饮记）。曾经挂过 popstate 再渲染一次去同步 navStack，
+   结果同一次导航渲染两遍、首页重建两次；而且延后渲染会打断 iOS 系统右滑的转场快照。
+   navStack 现在由 back()/finishTo() 自己 pop，跟饮记一样。 */
+window.addEventListener('hashchange', render);
 window.addEventListener('DOMContentLoaded', () => {
   bindEvents();
   boot();
