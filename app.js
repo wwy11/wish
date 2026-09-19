@@ -10,9 +10,9 @@
 /* ============ 常量 ============ */
 const CATS = [
   { id: 'digital', label: '数码' },
-  { id: 'clothes', label: '服饰' },
+  { id: 'accessory', label: '周边' },
   { id: 'home', label: '家居' },
-  { id: 'book', label: '书' },
+  { id: 'clothes', label: '服饰' },
   { id: 'other', label: '其他' },
 ];
 const CAT_LABEL = Object.fromEntries(CATS.map((c) => [c.id, c.label]));
@@ -1103,6 +1103,22 @@ const onHome = () => {
   return !h || h === 'home';
 };
 
+/** 旧分类一次性归并：2026-09-19 分类改成 数码/周边/家居/服饰/其他，
+    老数据里的「书」等已移除的取值统一并到「其他」并落库。
+    放在首次渲染之前跑，界面上不会先闪一下旧分类。幂等：并完就没得并了。 */
+async function migrateCats() {
+  const valid = new Set(CATS.map((c) => c.id));
+  const bad = items.filter((i) => !valid.has(i.category));
+  if (!bad.length) return;
+  for (const it of bad) {
+    it.category = 'other';
+    try {
+      await DB.putItem(it);
+    } catch (e) {} // 个别失败不影响其他条目，下次启动会重试
+  }
+  await refresh();
+}
+
 /** 旧数据没有 photoThumb（早期版本把 1000px 大图直接塞进列表）：启动后在后台补生成，
     补完静默刷一次首页——列表图片体积从几 MB 掉到几十 KB，回首页才不卡。
     只在首页刷新，别打断用户正在填的表单。 */
@@ -1127,6 +1143,7 @@ async function boot() {
   // 此时 in-app 返回用 location.replace 而不是 history.back
   try {
     await refresh();
+    await migrateCats(); // 旧分类先并到「其他」，再渲染，避免界面闪旧值
     render();
     backfillThumbs(); // 不 await：后台补旧数据的小图，别拖慢开屏
   } catch (err) {
