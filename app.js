@@ -51,6 +51,9 @@ const GEAR =
 let items = [];
 let pulsesByItem = Object.create(null);
 let tab = 'wish';
+/* 自己管的导航栈：每次进入页面 push，回退 pop。
+   浏览器历史深度恒为 1（全部用 location.replace），系统右滑从此无内容可滑 */
+let appStack = [];
 
 /* ============ 工具 ============ */
 const $ = (sel, root) => (root || document).querySelector(sel);
@@ -342,7 +345,8 @@ function renderItem(id) {
   const app = $('#app');
   const it = items.find((i) => i.id === id);
   if (!it) {
-    go('home');
+    // replace 而不是 go()：go() 会把首页压到详情上面，给系统右滑留脏历史
+    location.replace('#/home');
     return;
   }
   const ps = pulsesOf(id);
@@ -526,7 +530,7 @@ function renderForm(id) {
         toast('已加进清单');
       }
       await refresh();
-      goBackOrReplace(it ? 'item/' + it.id : 'home');
+      finishTo(it ? 'item/' + it.id : 'home');
     } catch (err) {
       submit.disabled = false;
       toast('保存失败：' + (err && err.message ? err.message : '未知错误'));
@@ -964,34 +968,42 @@ async function removeItem(id) {
   await DB.removeItem(id);
   await refresh();
   toast('已删除');
-  goBackOrReplace('home');
+  finishTo('home');
 }
 
 /* ============ 路由 ============ */
-let canBack = false; // 本次会话是否发生过站内前进
+/**
+ * 导航不用浏览器历史——所有跳转走 location.replace，浏览器历史深度恒为 1。
+ * 这么干是为了彻底甩掉 iOS 系统右滑=history.back 这个不可控的坑：
+ *   - 没有「首页底下压着详情页」这种历史脏条目，守卫/黑洞都不需要了；
+ *   - 系统右滑在任何页面都是退出 app（standalone 体感反而对：像原生 app）；
+ *   - 老版本（v1/v2/v3）攒在浏览器栈里的脏条目也自动失效——栈深度永远是 1。
+ * 我们自己维护 appStack 用来实现 in-app 返回按钮。
+ */
 function go(hash) {
-  canBack = true;
-  location.hash = '#/' + hash;
+  const h = hash[0] === '#' ? hash : '#/' + hash;
+  appStack.push(h);
+  location.replace(h);
 }
+
 function back() {
-  // 有上一页就正常返回；直接停在子页面刷新过的话，跳回首页，免得一路退出应用
-  if (canBack) {
-    canBack = false;
-    history.back();
-  } else {
-    location.hash = '#/home';
-  }
+  if (appStack.length <= 1) return; // 已在首页，in-app 返回无动作
+  appStack.pop();
+  location.replace(appStack[appStack.length - 1]);
 }
 
 /**
- * 表单保存、删除这类「完事回上一页」的动作专用：能返回就返回，绝不往历史栈里再压一条。
- * 这里以前用的是 go()，于是栈变成 [首页, 详情①, 编辑, 详情②]——
- * 用户在详情②点返回会退回编辑页，看着就像保存没生效。
- * 用 history.back() 回到已存在的详情①，栈回到 [首页, 详情①]，再返回才是首页。
+ * 表单保存、删除这类「完事回上一页」专用：栈够长就 pop 一层回到父页面，
+ * 否则（极少见，比如冷加载到深链页面后立刻保存）落到 fallback。
+ * 不要再用 go()——go 会 push 一条新历史，编辑/删除后就留在原地不会回去。
  */
-function goBackOrReplace(fallback) {
-  if (canBack) history.back();
-  else location.replace('#/' + fallback);
+function finishTo(fallback) {
+  if (appStack.length >= 2) {
+    appStack.pop();
+    location.replace(appStack[appStack.length - 1]);
+  } else {
+    location.replace('#/' + fallback);
+  }
 }
 
 function render() {
@@ -1051,6 +1063,11 @@ function bindEvents() {
 async function boot() {
   loadSettings();
   applyTheme(); // 首帧脚本已经定过一次，这里再同步一遍（顺带处理设置页改完主题的情况）
+  // 用当前 hash 还原 appStack：冷加载到首页就是 ['#/home']，深链就带上 ['#/home', '#/...']
+  // ——这样不管从哪里进来，in-app 返回按钮的「父页面」语义都是对的
+  const raw = location.hash.replace(/^#\/?/, '');
+  appStack = ['#/home'];
+  if (raw && raw !== 'home') appStack.push('#/' + raw);
   try {
     await refresh();
     render();
@@ -1059,7 +1076,13 @@ async function boot() {
   }
 }
 
-window.addEventListener('hashchange', render);
+window.addEventListener('hashchange', () => {
+  // 同步 appStack：用户在 Safari 地址栏手输 URL、跨标签同步、外部深链等场景
+  // 也会触发 hashchange 而不走 boot，这里兜一下；自己 replace 的同一 hash 不会重复 push
+  const cur = '#/' + (location.hash.replace(/^#\/?/, '') || 'home');
+  if (appStack[appStack.length - 1] !== cur) appStack.push(cur);
+  render();
+});
 window.addEventListener('DOMContentLoaded', () => {
   bindEvents();
   boot();
