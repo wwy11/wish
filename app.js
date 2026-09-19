@@ -331,6 +331,36 @@ function renderHome() {
   `;
 }
 
+/**
+ * 冷却状态变了才用的整页重排：让它当场沉底 / 浮回来（Enough 2026-09-19 定）。
+ * 不能直接硬跳——那正是第九轮被否掉的「点 Kindle 打 2 星，卡片从手指底下跳走」：
+ * 卡片凭空消失、用户不知道它跑哪去了。所以走 FLIP：重排前记下每行的位置，
+ * 重排后先按位移反向 translate 回原位，再放开让它自己滑过去，位移看得见。
+ */
+function renderHomeFlip() {
+  const before = new Map();
+  document.querySelectorAll('.sw').forEach((r) => before.set(r.dataset.sw, r.getBoundingClientRect().top));
+  renderHome();
+  document.querySelectorAll('.sw').forEach((r) => {
+    const t0 = before.get(r.dataset.sw);
+    if (t0 == null) return;
+    const dy = Math.round(t0 - r.getBoundingClientRect().top);
+    if (!dy) return; // 没动的行不用管
+    r.style.transition = 'none';
+    r.style.transform = `translateY(${dy}px)`;
+    r.getBoundingClientRect(); // 强制回流，把上面这个起点坐实
+    r.style.transition = 'transform .28s ease';
+    r.style.transform = '';
+  });
+  // 动画跑完把内联样式清掉，别留在 DOM 上
+  setTimeout(() => {
+    document.querySelectorAll('.sw').forEach((r) => {
+      r.style.transition = '';
+      r.style.transform = '';
+    });
+  }, 340);
+}
+
 /* ============ 页面：批量复评 ============ */
 function renderReview() {
   const app = $('#app');
@@ -1017,12 +1047,26 @@ function sheet(title, desc, actions) {
 }
 
 /* ============ 交互 ============ */
-async function rate(id, star) {
+/**
+ * 打分。reaffirm = 这处星星是「重新表态」（批量复评页 / 冷却页）：同分也算一次表态，
+ * 必须落库——不落的话打完分不会移出复评列表，那一页就废了。
+ * 首页 / 详情页的星星是「调数值」：分值没变就是什么都没发生 —— 不写 pulse、不弹 toast、
+ * 也不动 updatedAt（动了会被「最近修改」排序顶到前面，凭空多出一条改动记录）。
+ */
+async function rate(id, star, reaffirm) {
   const it = items.find((i) => i.id === id);
   if (!it) return;
+  const list = pulsesOf(id);
+  // 空 list 不能跳：heatOf 给 0、starOf(0) 兜成 1★，否则从没打过分的条目点 1★
+  // 会被误判成「没变化」，曲线永远没有起点。
+  if (!reaffirm && list.length && starOf(heatOf(it)) === star) {
+    closeAllSwipes(); // 手指的动作得有个回应：把滑开的行收回去，别的什么都不做
+    return;
+  }
+  // 冷却状态必须在改之前取：下面会就地改 pulse 对象，heatOf(it) 会立刻变成新值
+  const wasCooled = isCooled(it);
   const score = star * 20;
   const today = startOfDay(Date.now());
-  const list = pulsesOf(id);
   // 同一天重复打分 → 覆盖当天那条，而不是堆成噪声
   const same = list.find((p) => startOfDay(p.at) === today);
   try {
@@ -1046,13 +1090,18 @@ async function rate(id, star) {
     }
     closeAllSwipes(); // 从滑开的评分条打完分，把行收回去
 
-    // 首页只替换这一整行（cardHtml 现在返回带 .sw 外壳的整行），不整页重排 ——
+    // 首页：默认只替换这一整行（cardHtml 现在返回带 .sw 外壳的整行），不整页重排 ——
     // 否则刚点完的卡片会立刻从手指底下跳走，用户会不确定自己刚才点的是哪一条。
-    // 重排留到下次进入首页时自然发生。
+    //
+    // 唯一的例外是「冷却状态变了」：评到 2★ 及以下沉底、或从冷却里升回来，
+    // 这是看得见的状态切换，必须当场归位（Enough 2026-09-19 定）。
+    // 归位走 renderHomeFlip()，用 FLIP 动画滑过去，不是硬跳。
     const onHome = !!$('#reminders');
     const row = document.querySelector('.sw[data-sw="' + id + '"]');
     const fresh = items.find((i) => i.id === id);
-    if (onHome && row && fresh) {
+    if (onHome && fresh && wasCooled !== isCooled(fresh)) {
+      renderHomeFlip(); // 顺带重渲染提醒区（在 renderHome 里）
+    } else if (onHome && row && fresh) {
       row.outerHTML = cardHtml(fresh);
       updateReminders();
     } else {
@@ -1277,7 +1326,8 @@ function bindEvents() {
     const rateBtn = t.closest('button[data-rate]');
     if (rateBtn) {
       e.stopPropagation();
-      rate(rateBtn.dataset.rate, Number(rateBtn.dataset.star));
+      // 复评页 / 冷却页的星星是「重新表态」，同分也要落库（否则打完分不移出列表）
+      rate(rateBtn.dataset.rate, Number(rateBtn.dataset.star), !!rateBtn.closest('.review-card, .cool-card'));
       return;
     }
     if (t.closest('[data-sort]')) return openSortSheet();

@@ -241,7 +241,12 @@ body {
   margin-bottom: 10px;
 }
 
-.card.cooled {
+/* 冷却态：只压暗卡片里的内容，**绝不压 .card 本身**。
+   .card 是盖在滑出层（.sw-lead 重新评分条 / .sw-del 删除键）上面的那块挡板，
+   一旦它带 opacity 就半透明，底下那两层会直接透出来 —— 看起来像两条记录叠在一起。
+   （2026-09-19 真机报的「2★ 以下多条记录重合」就是这个：卡片半透明 + 底层绝对定位铺满整行） */
+.card.cooled > .card-row,
+.card.cooled > .card-spark {
   opacity: 0.62;
 }
 
