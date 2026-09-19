@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="种草" />
+  <meta name="theme-color" content="#fbf8f4" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="icons/icon-180.png" />
+  <script>
+    // 首帧前定好主题，避免深色用户闪一下亮色
+    (function () {
+      try {
+        var t = localStorage.getItem('wish-theme');
+        if (t === 'dark' || (t !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches)) {
+          document.documentElement.setAttribute('data-theme', 'dark');
+          var m = document.querySelector('meta[name="theme-color"]');
+          if (m) m.setAttribute('content', '#171412');
+        }
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="styles.css" />
+  <title>种草</title>
+</head>
+<body>
+  <div id="app"></div>
+
+  <script src="db.js"></script>
+  <script src="chart.js"></script>
+  <script src="app.js"></script>
+
+  <script>
+    // Service Worker：拿到新版只提示、不自动刷新。
+    // 自动 reload 会把正在填写的表单直接冲掉，代价太大，让用户自己点。
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', async () => {
+        try {
+          const reg = await navigator.serviceWorker.register('sw.js');
+          reg.update();
+          reg.addEventListener('updatefound', () => {
+            const sw = reg.installing;
+            if (!sw) return;
+            sw.addEventListener('statechange', () => {
+              // 已经有旧 SW 在管，才说明这是一次"更新"而不是首次安装
+              if (sw.state === 'installed' && navigator.serviceWorker.controller) showUpdateBar(sw);
+            });
+          });
+          navigator.serviceWorker.addEventListener('controllerchange', () => location.reload());
+        } catch (e) {}
+      });
+    }
+
+    function showUpdateBar(sw) {
+      if (document.getElementById('update-bar')) return;
+      const bar = document.createElement('div');
+      bar.id = 'update-bar';
+      bar.className = 'update-bar';
+      bar.innerHTML = '<span>有新版本</span><span class="ub-go">更新</span>';
+      bar.addEventListener('click', () => {
+        sw.postMessage('skip-waiting');
+        bar.remove();
+      });
+      document.body.appendChild(bar);
+    }
+  </script>
+</body>
+</html>
