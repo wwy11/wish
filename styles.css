@@ -105,6 +105,12 @@ body {
   width: 44px;
 }
 
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
 /* ---------- 顶部三个数字 ---------- */
 .metrics {
   display: grid;
@@ -133,14 +139,18 @@ body {
   text-overflow: ellipsis;
 }
 
-/* ---------- 复评提醒条 ---------- */
-.review-bar {
+/* ---------- 首页提醒 ---------- */
+.reminders:empty {
+  display: none;
+}
+
+.remind-bar {
   width: 100%;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
   padding: 11px 13px;
   border: 0;
   border-radius: 10px;
@@ -150,6 +160,12 @@ body {
   font-family: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+/* 冷却提醒是「可以清理了」，不是「该做点什么」，所以比待复评弱一档 */
+.remind-bar.cool {
+  background: var(--soft);
+  color: var(--text2);
 }
 
 .rb-go {
@@ -180,6 +196,37 @@ body {
 }
 
 .tab.on {
+  background: var(--card);
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* ---------- 设置项用的分段选择 ---------- */
+.seg {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 3px;
+  background: var(--soft);
+  border-radius: 10px;
+}
+
+.seg-btn {
+  flex: 1;
+  min-width: 62px;
+  height: 32px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text2);
+  font-size: 13px;
+  font-family: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.seg-btn.on {
   background: var(--card);
   color: var(--text);
   font-weight: 600;
@@ -265,6 +312,19 @@ body {
 .card-spark {
   margin-top: 4px;
   height: 26px;
+}
+
+.cool-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 0.5px solid var(--line);
+}
+
+.ver-line {
+  font-size: 13px;
+  color: var(--text2);
 }
 
 .spark {
@@ -599,4 +659,48 @@ textarea {
 .toast.show {
   opacity: 1;
   transform: translate(-50%, 0);
+}
+
+/* ---------- 底部选择面板（导入时选合并/覆盖） ---------- */
+.sheet-mask {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 70;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.sheet {
+  width: 100%;
+  max-width: 640px;
+  padding: 16px 14px calc(var(--safe-b) + 16px);
+  border-radius: 16px 16px 0 0;
+  background: var(--bg);
+}
+
+.sheet-title {
+  margin-bottom: 4px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.sheet-desc {
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: var(--text2);
+  line-height: 1.6;
+}
+
+.sheet-btn {
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+.sheet-btn:last-child {
+  margin-bottom: 0;
 }

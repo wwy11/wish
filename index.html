@@ -13,8 +13,10 @@
     // 首帧前定好主题，避免深色用户闪一下亮色
     (function () {
       try {
-        var t = localStorage.getItem('wish-theme');
-        if (t === 'dark' || (t !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches)) {
+        // 主题存在 wish-settings 里（设置页改），首帧先读一次，避免深色用户闪一下亮色
+        var s = JSON.parse(localStorage.getItem('wish-settings') || '{}');
+        var t = s.theme || 'auto';
+        if (t === 'dark' || (t === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches)) {
           document.documentElement.setAttribute('data-theme', 'dark');
           var m = document.querySelector('meta[name="theme-color"]');
           if (m) m.setAttribute('content', '#171412');

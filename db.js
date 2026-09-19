@@ -65,6 +65,15 @@ const DB = (() => {
     return store(name, 'readonly').then((s) => wrap(s.getAll()));
   }
 
+  /** 事务完成/失败统一成一个 Promise：onerror 和 onabort 都要接，否则删到一半失败会静默 */
+  function txDone(t) {
+    return new Promise((res, rej) => {
+      t.oncomplete = () => res();
+      t.onerror = () => rej(t.error);
+      t.onabort = () => rej(t.error || new Error('事务被中断'));
+    });
+  }
+
   return {
     /** 一次读全：物品按加入时间倒序，打分按时间正序（画曲线要用） */
     async snapshot() {
@@ -90,11 +99,29 @@ const DB = (() => {
           t.objectStore(PULSES).delete(c.primaryKey);
           c.continue();
         };
-        return new Promise((res, rej) => {
-          t.oncomplete = () => res();
-          t.onerror = () => rej(t.error);
-          t.onabort = () => rej(t.error || new Error('删除被中断'));
-        });
+        return txDone(t);
+      });
+    },
+
+    /** 覆盖导入：先清空两个 store 再写入。必须同一事务，否则中途失败会留下半个库 */
+    replaceAll(newItems, newPulses) {
+      return open().then((db) => {
+        const t = db.transaction([ITEMS, PULSES], 'readwrite');
+        t.objectStore(ITEMS).clear();
+        t.objectStore(PULSES).clear();
+        newItems.forEach((i) => t.objectStore(ITEMS).put(i));
+        newPulses.forEach((p) => t.objectStore(PULSES).put(p));
+        return txDone(t);
+      });
+    },
+
+    /** 合并导入：同 id 覆盖，现有数据保留 */
+    mergeAll(newItems, newPulses) {
+      return open().then((db) => {
+        const t = db.transaction([ITEMS, PULSES], 'readwrite');
+        newItems.forEach((i) => t.objectStore(ITEMS).put(i));
+        newPulses.forEach((p) => t.objectStore(PULSES).put(p));
+        return txDone(t);
       });
     },
 
