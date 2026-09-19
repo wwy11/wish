@@ -57,6 +57,13 @@ let tab = 'wish';
    （从 coffee 抄的同一思路） */
 let navStack = [];
 
+/* 首页快照缓存：离开首页时把 DOM 原样抱走，回来时数据没变就整块放回。
+   背景实测：back 回首页每次都整页重建 innerHTML，iPhone 上 20 张卡的
+   base64 字符串解析 + 图片重新解码就是好几秒空屏。复用同一批节点，
+   解码缓存还在，恢复是瞬间的。数据版本号在 refresh() 里递增作废缓存。 */
+let homeCache = null; // { frag: DocumentFragment, scrollY, dataVer }
+let dataVer = 0;
+
 /* ============ 工具 ============ */
 const $ = (sel, root) => (root || document).querySelector(sel);
 const esc = (s) =>
@@ -145,6 +152,7 @@ const deltaOf = (it) => {
 const isCooled = (it) => it.status === 'wish' && heatOf(it) <= settings.coolStar * 20;
 
 async function refresh() {
+  dataVer++; // 数据变了，首页快照作废（所有改数据的路径都汇经这里）
   const snap = await DB.snapshot();
   items = snap.items;
   pulsesByItem = Object.create(null);
@@ -164,7 +172,7 @@ function starsHtml(it, big) {
 }
 
 function thumbHtml(it) {
-  if (it.photo) return `<img class="thumb" src="${esc(it.photo)}" alt="" />`;
+  if (it.photo) return `<img class="thumb" src="${esc(it.photo)}" alt="" decoding="async" />`;
   return `<div class="thumb thumb-ph">${esc((it.name || '?').trim().slice(0, 1))}</div>`;
 }
 
@@ -221,8 +229,29 @@ function cardHtml(it) {
 }
 
 /* ============ 页面：首页 ============ */
+/** 离开首页时抱走 DOM；回来时数据没变就原样放回（图片解码缓存还在，瞬间恢复） */
+function captureHome() {
+  const app = $('#app');
+  if (!app.firstChild) return;
+  const frag = document.createDocumentFragment();
+  while (app.firstChild) frag.appendChild(app.firstChild);
+  homeCache = { frag, scrollY: window.scrollY, dataVer };
+}
+
+function restoreHome() {
+  if (!homeCache || homeCache.dataVer !== dataVer) return false;
+  if (!homeCache.frag || !homeCache.frag.firstChild) return false; // 已被上次恢复用掉，走重建
+  const app = $('#app');
+  app.textContent = '';
+  app.appendChild(homeCache.frag);
+  window.scrollTo(0, homeCache.scrollY);
+  ensureHomeGuard();
+  return true;
+}
+
 function renderHome() {
   const app = $('#app');
+  if (restoreHome()) return;
   const wish = items.filter((i) => i.status === 'wish');
   const list = items.filter((i) => i.status === tab);
   // 冷却的沉底，其余按热度降序
@@ -369,7 +398,7 @@ function renderItem(id) {
       <button class="icon-btn" data-edit="${esc(it.id)}" aria-label="编辑">✎</button>
     </header>
 
-    ${it.photo ? `<div class="hero"><img src="${esc(it.photo)}" alt="" /></div>` : ''}
+    ${it.photo ? `<div class="hero"><img src="${esc(it.photo)}" alt="" decoding="async" /></div>` : ''}
 
     <div class="detail-head">
       <div class="d-name">${esc(it.name)}</div>
@@ -998,6 +1027,7 @@ function go(hash) {
     /* 从首页出发 → replace：保证 history.back() 自然回到首页。
        这样「首页→detail→回→首页→detail(另一条)→回」也不会在栈里堆 detail 副本 */
     navStack.push('home');
+    captureHome(); // 抱走首页 DOM，back 回来时直接放回，不整页重建
     location.replace('#/' + hash);
   } else {
     /* 从子页面出发 → push：让 history.back() 回到上一层子页面（编辑→详情、详情→冷却等） */
@@ -1112,15 +1142,26 @@ async function boot() {
   }
 }
 
-window.addEventListener('hashchange', render);
+/* 同一次导航 popstate 和 hashchange 会各 fire 一次（浏览器行为），不合并的话
+   render 每次跑两遍，首页快照恢复也会被第二遍打穿（frag 已被搬空 → 全量重建）。
+   setTimeout(0) 把同一段事件里的多次触发并成一次。 */
+let renderTimer = 0;
+function scheduleRender() {
+  if (renderTimer) return;
+  renderTimer = setTimeout(() => {
+    renderTimer = 0;
+    render();
+  }, 0);
+}
+window.addEventListener('hashchange', scheduleRender);
 // popstate 同步 navStack：不管谁触发的历史切换（系统右滑、我们的 back/finishTo），
 // history 真正换了就会 fire popstate——我们在 popstate 里 pop navStack，让栈和浏览器历史始终一致。
-// 顺带：如果刚好落在首页，renderHome() 里的 ensureHomeGuard 会处理守卫。
+// 顺带：如果刚好落在首页，renderHome() 里的 restoreHome/ensureHomeGuard 会处理守卫。
 // 关键：忽略 go() 自己触发的 popstate（Chrome 在 location.hash= 变化时也会 fire popstate），
 // 只有「回退」（location.hash ≠ go() 设置的 hash）才 pop。
 window.addEventListener('popstate', () => {
   if (location.hash !== _lastGoHash && navStack.length > 0) navStack.pop();
-  render();
+  scheduleRender();
 });
 window.addEventListener('DOMContentLoaded', () => {
   bindEvents();
